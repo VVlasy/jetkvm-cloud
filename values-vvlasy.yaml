@@ -22,8 +22,9 @@ api:
     # Lowercase on purpose; the live value `X-Real-IP` never matched (Node lowercases headers),
     # so device IPs were logged as Traefik's pod IP.
     REAL_IP_HEADER: x-real-ip
-    # ALLOWED_IDENTITIES deliberately not set here: it stays in the Secret, where it is
-    # currently empty (= any Google account may sign in). Put your e-mail there to lock it down.
+    # null removes the chart default so the key is NOT in the ConfigMap; the value in the
+    # Secret stays authoritative (currently empty = any Google account may sign in).
+    ALLOWED_IDENTITIES: null
   ingress:
     enabled: true
     className: traefik
