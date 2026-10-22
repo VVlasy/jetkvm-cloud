@@ -79,8 +79,9 @@ kubectl -n jetkvm exec postgres-0 -- sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGR
 helm diff upgrade jetkvm charts/jetkvm-cloud -n jetkvm -f values-vvlasy.yaml   # helm-diff plugin
 #   or: helm template jetkvm charts/jetkvm-cloud -n jetkvm -f values-vvlasy.yaml > rendered.yaml
 
-# 4. apply
+# 4. apply (from the checkout, or from the packaged chart in dist/)
 helm upgrade --install jetkvm charts/jetkvm-cloud -n jetkvm -f values-vvlasy.yaml
+#   helm upgrade --install jetkvm https://raw.githubusercontent.com/VVlasy/jetkvm-cloud/main/dist/jetkvm-cloud-0.1.0.tgz -n jetkvm -f values-vvlasy.yaml
 
 # 5. watch the migration, then the API
 kubectl -n jetkvm logs deploy/cloud-api -c migrate -f
