@@ -108,6 +108,17 @@ loads its ConfigMap after the Secret, so the ConfigMap values win. Once things r
 Secret down to real secrets (`DATABASE_URL`, `GOOGLE_CLIENT_*`, `COOKIE_SECRET`, …) or move to chart-
 managed secrets by removing `existingSecret` and filling `api.secret`.
 
+Helm 4 note: Helm 4 applies server-side by default and merges into the live object, so adopted
+Deployments would keep stale fields from the old manifests (init containers, volumes, command).
+Adopt with Helm 3, or `--server-side=false`, or first `kubectl replace` the Deployments with the
+rendered templates (`helm template … -s templates/api/deployment.yaml`). Services and Ingresses
+adopt cleanly either way (`--force-conflicts` on Helm 4).
+
+In-cluster runner: namespace `jetkvm` has ServiceAccount/Role/RoleBinding `helm-runner` (full
+rights on core, apps and networking.k8s.io in that namespace only). A throwaway `alpine:3.20` pod
+with `apk add git helm kubectl` and that service account can run every command above without a
+workstation.
+
 Rollback: `helm rollback jetkvm 0` restores the pre-Helm manifests only if Helm recorded them, which
 it does not for adopted resources. Keep `kubectl -n jetkvm get deploy,sts,svc,ing -o yaml` from
 before the upgrade.
