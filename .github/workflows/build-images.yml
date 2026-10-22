@@ -21,19 +21,21 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  OWNER: ${{ github.repository_owner }}
 
 jobs:
   cloud-api:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Lowercase owner (ghcr requires it)
+        id: owner
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
       - name: Resolve ref
         id: ref
         run: |
@@ -51,21 +53,24 @@ jobs:
           build-args: |
             CLOUD_API_REF=${{ steps.ref.outputs.ref }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/jetkvm-cloud-api:${{ steps.ref.outputs.short }}
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/jetkvm-cloud-api:latest
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/jetkvm-cloud-api:${{ steps.ref.outputs.short }}
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/jetkvm-cloud-api:latest
           cache-from: type=gha,scope=cloud-api
           cache-to: type=gha,scope=cloud-api,mode=max
 
   cloud-ui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Lowercase owner (ghcr requires it)
+        id: owner
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
       - name: Resolve ref
         id: ref
         run: |
@@ -88,7 +93,7 @@ jobs:
           build-args: |
             KVM_REF=${{ steps.ref.outputs.ref }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/jetkvm-cloud-ui:${{ steps.ref.outputs.tag }}
-            ${{ env.REGISTRY }}/${{ env.OWNER }}/jetkvm-cloud-ui:latest
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/jetkvm-cloud-ui:${{ steps.ref.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/jetkvm-cloud-ui:latest
           cache-from: type=gha,scope=cloud-ui
           cache-to: type=gha,scope=cloud-ui,mode=max
