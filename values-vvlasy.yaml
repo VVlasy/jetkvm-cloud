@@ -65,7 +65,10 @@ ui:
       memory: 128Mi
 
 postgres:
-  enabled: true
+  # Left unmanaged for now: the hand-rolled StatefulSet keeps running as-is (adopting it
+  # means a restart and a server-side-apply merge on an immutable field). Flip to true and
+  # run `helm upgrade --server-side=false` to take it over later.
+  enabled: false
   name: postgres
   # Existing Secret `postgres` (POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB).
   # DATABASE_URL stays in the `cloud-api` Secret.
