@@ -1,0 +1,112 @@
+{{- $name := include "jetkvm-cloud.api.name" . }}
+{{- $image := include "jetkvm-cloud.api.image" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "jetkvm-cloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cloud-api
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  strategy:
+    {{- toYaml .Values.api.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "jetkvm-cloud.selectorLabels" (dict "name" $name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "jetkvm-cloud.selectorLabels" (dict "name" $name) | nindent 8 }}
+        {{- include "jetkvm-cloud.labels" . | nindent 8 }}
+        app.kubernetes.io/component: cloud-api
+        {{- with .Values.api.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Roll the pods when config or the chart-managed secret changes
+        checksum/config: {{ include (print $.Template.BasePath "/api/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.api.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/api/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.api.migrations.enabled }}
+      initContainers:
+        - name: migrate
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          command: ["npx", "prisma", "migrate", "deploy"]
+          envFrom:
+            - secretRef:
+                name: {{ include "jetkvm-cloud.api.secretName" . }}
+            - configMapRef:
+                name: {{ $name }}
+          {{- with .Values.api.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.api.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.api.migrations.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- end }}
+      containers:
+        - name: cloud-api
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.config.PORT | default 3000 | int }}
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: {{ include "jetkvm-cloud.api.secretName" . }}
+            - configMapRef:
+                name: {{ $name }}
+          {{- with .Values.api.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.api.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.api.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.api.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.api.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

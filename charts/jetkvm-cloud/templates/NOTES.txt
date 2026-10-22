@@ -1,0 +1,21 @@
+JetKVM cloud {{ .Chart.Version }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Components:
+  cloud-api  Deployment/{{ include "jetkvm-cloud.api.name" . }}   image {{ include "jetkvm-cloud.api.image" . }}
+  cloud-ui   Deployment/{{ include "jetkvm-cloud.ui.name" . }}    image {{ .Values.ui.image.repository }}:{{ .Values.ui.image.tag }}
+{{- if .Values.postgres.enabled }}
+  postgres   StatefulSet/{{ include "jetkvm-cloud.postgres.name" . }}
+{{- end }}
+
+{{- if .Values.api.ingress.enabled }}
+API:  https://{{ .Values.api.ingress.host }}
+{{- end }}
+{{- if .Values.ui.ingress.enabled }}
+UI:   https://{{ .Values.ui.ingress.host }}
+{{- end }}
+
+Google OAuth redirect URI to register: {{ .Values.api.config.API_HOSTNAME }}/oidc/callback
+
+Check the migration init container and the API log:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "jetkvm-cloud.api.name" . }} -c migrate
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "jetkvm-cloud.api.name" . }} -c cloud-api

@@ -1,0 +1,21 @@
+{{- $name := include "jetkvm-cloud.api.name" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "jetkvm-cloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cloud-api
+  {{- with .Values.api.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.api.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.api.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "jetkvm-cloud.selectorLabels" (dict "name" $name) | nindent 4 }}

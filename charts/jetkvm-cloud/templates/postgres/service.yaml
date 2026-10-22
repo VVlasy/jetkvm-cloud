@@ -1,0 +1,20 @@
+{{- if .Values.postgres.enabled }}
+{{- $name := include "jetkvm-cloud.postgres.name" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "jetkvm-cloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  # Headless: the StatefulSet's governing service
+  clusterIP: None
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+  selector:
+    {{- include "jetkvm-cloud.selectorLabels" (dict "name" $name) | nindent 4 }}
+{{- end }}

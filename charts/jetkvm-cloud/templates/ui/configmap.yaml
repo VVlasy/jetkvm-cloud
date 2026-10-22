@@ -1,0 +1,12 @@
+{{- if .Values.ui.nginxConfig }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "jetkvm-cloud.ui.name" . }}-nginx
+  labels:
+    {{- include "jetkvm-cloud.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cloud-ui
+data:
+  default.conf: |
+    {{- .Values.ui.nginxConfig | nindent 4 }}
+{{- end }}

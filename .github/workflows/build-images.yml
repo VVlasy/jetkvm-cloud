@@ -1,0 +1,94 @@
+name: Build images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "build/**"
+      - ".github/workflows/build-images.yml"
+  workflow_dispatch:
+    inputs:
+      cloud_api_ref:
+        description: "jetkvm/cloud-api full 40-char commit SHA or tag (default: Dockerfile ARG)"
+        required: false
+      kvm_ref:
+        description: "jetkvm/kvm ref for the UI, e.g. release/0.5.9 (default: Dockerfile ARG)"
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: ${{ github.repository_owner }}
+
+jobs:
+  cloud-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve ref
+        id: ref
+        run: |
+          ref="${{ inputs.cloud_api_ref }}"
+          if [ -z "$ref" ]; then
+            ref=$(sed -nE 's/^ARG CLOUD_API_REF=(.+)$/\1/p' build/cloud-api/Dockerfile)
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "short=${ref:0:7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: build/cloud-api
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            CLOUD_API_REF=${{ steps.ref.outputs.ref }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/jetkvm-cloud-api:${{ steps.ref.outputs.short }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/jetkvm-cloud-api:latest
+          cache-from: type=gha,scope=cloud-api
+          cache-to: type=gha,scope=cloud-api,mode=max
+
+  cloud-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve ref
+        id: ref
+        run: |
+          ref="${{ inputs.kvm_ref }}"
+          if [ -z "$ref" ]; then
+            ref=$(sed -nE 's/^ARG KVM_REF=(.+)$/\1/p' build/cloud-ui/Dockerfile)
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          # release/0.5.9 -> 0.5.9 ; anything else -> first 7 chars
+          case "$ref" in
+            release/*) tag="${ref#release/}" ;;
+            *) tag="${ref:0:7}" ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: build/cloud-ui
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            KVM_REF=${{ steps.ref.outputs.ref }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/jetkvm-cloud-ui:${{ steps.ref.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/jetkvm-cloud-ui:latest
+          cache-from: type=gha,scope=cloud-ui
+          cache-to: type=gha,scope=cloud-ui,mode=max

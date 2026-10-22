@@ -1,0 +1,219 @@
+# Default values for jetkvm-cloud.
+#
+# Resource naming: components are named "<release>-cloud-api", "<release>-cloud-ui",
+# "<release>-postgres" unless you set <component>.name. Set api.name=cloud-api,
+# ui.name=cloud-ui, postgres.name=postgres to take over a hand-rolled deployment that
+# used those names (see README, "Adopting").
+
+nameOverride: ""
+# Replaces the release name as the prefix above
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+# Extra labels put on every resource
+commonLabels: {}
+
+# ------------------------------------------------------------------ cloud-api
+api:
+  name: ""
+  replicaCount: 1
+  image:
+    repository: ghcr.io/vvlasy/jetkvm-cloud-api
+    # Defaults to Chart.appVersion
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Recreate: the API holds WebRTC signalling state and uses one DB; two pods at once gain nothing.
+  strategy:
+    type: Recreate
+
+  # Non-secret environment, rendered into a ConfigMap and loaded with envFrom.
+  # Loaded AFTER the secret, so a key here wins over the same key in the secret.
+  config:
+    PORT: "3000"
+    # Public URL of this API (used for OIDC redirect URIs)
+    API_HOSTNAME: https://api.jetkvm.example.com
+    # Public URL of the UI
+    APP_HOSTNAME: https://jetkvm.example.com
+    # Comma-separated browser origins allowed to call the API
+    CORS_ORIGINS: https://jetkvm.example.com
+    # Comma-separated STUN/TURN URLs handed to devices and browsers
+    ICE_SERVERS: stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
+    # Header the ingress sets with the client IP; empty if not behind a proxy.
+    # Must be lowercase: Node lowercases incoming header names and the API does a plain lookup.
+    REAL_IP_HEADER: x-real-ip
+    # Comma-separated e-mails allowed to sign in; empty allows everyone with a Google account
+    ALLOWED_IDENTITIES: ""
+
+  # Secret environment. Either fill these (chart creates a Secret) or set existingSecret.
+  # Keys mirror upstream .env.example.
+  secret:
+    GOOGLE_CLIENT_ID: ""
+    GOOGLE_CLIENT_SECRET: ""
+    # Random string for session cookies, e.g. `openssl rand -hex 32`
+    COOKIE_SECRET: ""
+    # Leave empty with postgres.enabled=true and postgres.auth.password set: the chart builds it.
+    DATABASE_URL: ""
+    CLOUDFLARE_TURN_ID: ""
+    CLOUDFLARE_TURN_TOKEN: ""
+    # S3-compatible storage for firmware releases (optional)
+    R2_ENDPOINT: ""
+    R2_ACCESS_KEY_ID: ""
+    R2_SECRET_ACCESS_KEY: ""
+    R2_BUCKET: ""
+    R2_CDN_URL: ""
+    # Bearer token for POST /releases/sync; empty disables the endpoint
+    RELEASE_SYNC_TOKEN: ""
+  # Name of a pre-existing Secret holding the keys above. When set, api.secret is ignored
+  # and no Secret is created.
+  existingSecret: ""
+
+  # Extra env entries (list of EnvVar), e.g. valueFrom references
+  extraEnv: []
+
+  # Run `npx prisma migrate deploy` in an init container before the API starts.
+  # Idempotent; Prisma takes an advisory lock, so a restart during a migration is safe.
+  migrations:
+    enabled: true
+    resources: {}
+
+  service:
+    type: ClusterIP
+    port: 3000
+    annotations: {}
+
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: api.jetkvm.example.com
+    path: /
+    pathType: Prefix
+    # List of IngressTLS. With Traefik's certresolver annotation `- {}` is enough.
+    tls: []
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 20
+    periodSeconds: 15
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+
+  resources: {}
+  #  requests: {cpu: 100m, memory: 256Mi}
+  #  limits: {memory: 512Mi}
+
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ------------------------------------------------------------------ cloud-ui
+ui:
+  name: ""
+  replicaCount: 1
+  image:
+    repository: ghcr.io/vvlasy/jetkvm-cloud-ui
+    # Matches the jetkvm/kvm release line your devices run
+    tag: "0.5.9"
+    pullPolicy: IfNotPresent
+  strategy:
+    type: RollingUpdate
+
+  # API URL substituted into the bundle at container start.
+  # Empty = api.config.API_HOSTNAME.
+  cloudApiUrl: ""
+
+  # Replace the image's nginx server block. Empty keeps the one baked into the image.
+  nginxConfig: ""
+
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: jetkvm.example.com
+    path: /
+    pathType: Prefix
+    tls: []
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 15
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 2
+    periodSeconds: 5
+
+  resources: {}
+  podAnnotations: {}
+  podLabels: {}
+  # The start script edits files under /usr/share/nginx/html, and nginx binds :80,
+  # so the container runs as the image default (root). Do not set readOnlyRootFilesystem.
+  podSecurityContext: {}
+  securityContext:
+    allowPrivilegeEscalation: false
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ------------------------------------------------------------------ PostgreSQL
+# A single-replica StatefulSet. Disable to use an external database and set
+# api.secret.DATABASE_URL (or api.existingSecret).
+postgres:
+  enabled: true
+  name: ""
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+
+  auth:
+    username: jetkvm
+    # Required unless existingSecret is set. URL-encoded into DATABASE_URL, so any characters work.
+    password: ""
+    database: jetkvm
+  # Pre-existing Secret with POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB.
+  # With existingSecret the chart cannot build DATABASE_URL; set api.secret.DATABASE_URL
+  # or api.existingSecret yourself.
+  existingSecret: ""
+
+  persistence:
+    # Name of the volumeClaimTemplate. Immutable once the StatefulSet exists.
+    claimName: data
+    storageClassName: ""
+    accessModes: ["ReadWriteOnce"]
+    size: 5Gi
+
+  resources: {}
+  podAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: jetkvm-cloud
+description: Self-hosted JetKVM cloud (cloud-api + web UI + optional PostgreSQL)
+type: application
+version: 0.1.0
+# Image tag of cloud-api used by default (short SHA of jetkvm/cloud-api main @ 2026-10-21)
+appVersion: "d08418e"
+home: https://github.com/jetkvm/cloud-api
+sources:
+  - https://github.com/jetkvm/cloud-api
+  - https://github.com/jetkvm/kvm
+keywords:
+  - jetkvm
+  - kvm
+  - webrtc
