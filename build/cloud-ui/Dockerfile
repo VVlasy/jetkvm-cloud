@@ -1,7 +1,7 @@
 # JetKVM cloud UI (the `ui/` app from jetkvm/kvm, built in cloud-production mode)
 # served by nginx.
 #
-#   docker build --build-arg KVM_REF=release/0.5.9 -t ghcr.io/vvlasy/jetkvm-cloud-ui:0.5.9 .
+#   docker build --build-arg KVM_REF=release/0.5.10 -t ghcr.io/vvlasy/jetkvm-cloud-ui:0.5.10 .
 #
 # The API URL is a build-time constant in Vite. To keep one image usable for
 # several environments, the build bakes in a placeholder and the container
@@ -13,7 +13,7 @@ ARG NODE_VERSION=22.23.4
 ARG NGINX_VERSION=1.28-alpine
 ARG KVM_REPO=https://github.com/jetkvm/kvm.git
 # Full commit SHA (40 chars), tag or branch of jetkvm/kvm. Must match the firmware line your devices run.
-ARG KVM_REF=release/0.5.9
+ARG KVM_REF=release/0.5.10
 ARG VITE_CLOUD_API=https://__JETKVM_CLOUD_API__
 # "true" enables the per-device-version UI switcher in 0.5.9+. Keep off for a single self-hosted build.
 ARG VITE_CLOUD_ENABLE_VERSIONED_UI=false

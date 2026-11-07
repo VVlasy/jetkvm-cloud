@@ -19,18 +19,33 @@ Upstream ships only a `compose.yaml`. This repo adds:
 The previous manifests cloned upstream `main` and ran `npm install` on every pod start, on Node 21
 (EOL June 2024), and never ran Prisma migrations. Any restart was an unreviewed upgrade. Here the
 upstream ref is a build arg, the image is immutable, migrations run before the API starts, and the
-UI tracks the firmware release line (`release/0.5.9`).
+UI tracks the firmware release line (`release/0.5.10`).
+
+## Local patches
+
+`build/cloud-api/patches/` holds changes not (yet) upstream, applied at build time:
+
+- `0001-refresh-google-id-token.patch`: sessions kept the Google ID token and both the API and the
+  device firmware reject it after its 1-hour `exp`, so users were signed out (and could not open a
+  KVM session) an hour after login. Login now requests a refresh token (`access_type=offline`,
+  `prompt=consent`), stores it AES-GCM-encrypted in the session cookie (key derived from
+  `COOKIE_SECRET`), and swaps in a fresh ID token shortly before expiry. Sessions are capped at 30
+  days after login; the cookie's 24 h `maxAge` stays the idle timeout. Upstream PR
+  jetkvm/cloud-api#65 only stops the API check, which leaves the device rejecting the stale token.
+  Needs the Google OAuth consent screen in **In production**: in **Testing**, Google expires
+  refresh tokens after 7 days.
 
 ## Images
 
 ```bash
-# cloud-api, pinned commit (default = main @ 2026-10-21, d08418e)
-docker build build/cloud-api -t ghcr.io/vvlasy/jetkvm-cloud-api:d08418e \
-  --build-arg CLOUD_API_REF=d08418e650b6a03c17dbdc90bbd7cde2b105c7f2
+# cloud-api, pinned commit (default = main @ 2026-11-06, a96f7d4) plus build/cloud-api/patches/*.patch.
+# CI tags patched builds <short-sha>-p<first 7 hex of sha256 over the patches>.
+docker build build/cloud-api -t ghcr.io/vvlasy/jetkvm-cloud-api:a96f7d4-p6b6c3a4 \
+  --build-arg CLOUD_API_REF=a96f7d4706e75d557f7c5b383caa722e69ac77bb
 
 # cloud-ui, tracks the kvm release line your devices run
-docker build build/cloud-ui -t ghcr.io/vvlasy/jetkvm-cloud-ui:0.5.9 \
-  --build-arg KVM_REF=release/0.5.9
+docker build build/cloud-ui -t ghcr.io/vvlasy/jetkvm-cloud-ui:0.5.10 \
+  --build-arg KVM_REF=release/0.5.10
 ```
 
 Or push this repo to GitHub and run the `Build images` workflow (`workflow_dispatch` takes the refs).
