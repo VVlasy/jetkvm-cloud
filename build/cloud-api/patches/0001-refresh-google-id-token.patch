@@ -1,0 +1,486 @@
+From 84bcb54c99455a42e16a79b18b2ac1b0f9feb4c9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 10:01:11 +0000
+Subject: [PATCH] fix(auth): refresh the Google ID token so sessions outlive
+ its 1-hour lifetime
+
+---
+ src/index.ts               |   3 +
+ src/oidc.ts                |   9 +++
+ src/token-refresh.ts       | 156 +++++++++++++++++++++++++++++++++++++
+ src/webrtc-signaling.ts    |  26 +++++--
+ test/token-refresh.test.ts | 136 ++++++++++++++++++++++++++++++++
+ 5 files changed, 323 insertions(+), 7 deletions(-)
+ create mode 100644 src/token-refresh.ts
+ create mode 100644 test/token-refresh.test.ts
+
+diff --git a/src/index.ts b/src/index.ts
+index 5d677e9..ef03210 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -12,6 +12,7 @@ import * as Releases from "./releases";
+ 
+ import { HttpError } from "./errors";
+ import { authenticated, bearerToken } from "./auth";
++import { refreshSessionToken } from "./token-refresh";
+ import { prisma } from "./db";
+ import { baseUrl, bucketName, s3Client } from "./s3";
+ import { createReleaseSyncRunner, scheduleReleaseSync } from "./release-sync";
+@@ -82,6 +83,8 @@ export const cookieSessionMiddleware = cookieSession({
+ });
+ 
+ app.use(cookieSessionMiddleware);
++// Renew the Google ID token before it expires, so sessions outlive its 1-hour lifetime.
++app.use(refreshSessionToken);
+ 
+ // express-session won't sent the cookie, as it's `secure` and `secureProxy` is set to true
+ // DO Apps doesn't send a X-Forwarded-Proto header, so we simply need to make a blanket trust
+diff --git a/src/oidc.ts b/src/oidc.ts
+index 7908e76..c2e4371 100644
+--- a/src/oidc.ts
++++ b/src/oidc.ts
+@@ -3,6 +3,7 @@ import express from "express";
+ import { prisma } from "./db";
+ import { BadRequestError, UnauthorizedError } from "./errors";
+ import { isIdentityAllowed } from "./auth";
++import { sealRefreshToken } from "./token-refresh";
+ import * as crypto from "crypto";
+ 
+ const API_HOSTNAME = process.env.API_HOSTNAME;
+@@ -42,6 +43,10 @@ export const Google = async (req: express.Request, res: express.Response) => {
+     // which is stored in the session cookie.
+     code_challenge,
+     code_challenge_method: "S256",
++    // Ask for a refresh token so the 1-hour ID token can be renewed (see token-refresh.ts).
++    // Google only returns one on a consent screen, hence prompt=consent.
++    access_type: "offline",
++    prompt: "consent",
+   });
+   return res.redirect(authorizationUrl);
+ };
+@@ -99,6 +104,10 @@ export const Callback = async (req: express.Request, res: express.Response) => {
+   }
+ 
+   req.session!.id_token = tokenSet.id_token;
++  req.session!.authenticatedAt = Date.now();
++  req.session!.refresh_token_sealed = tokenSet.refresh_token
++    ? sealRefreshToken(tokenSet.refresh_token)
++    : null;
+ 
+   await prisma.user.upsert({
+     where: { googleId: tokenClaims.sub },
+diff --git a/src/token-refresh.ts b/src/token-refresh.ts
+new file mode 100644
+index 0000000..2cea2e0
+--- /dev/null
++++ b/src/token-refresh.ts
+@@ -0,0 +1,156 @@
++import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
++import type { NextFunction, Request, Response } from "express";
++import * as jose from "jose";
++import { Issuer, type BaseClient, type TokenSet } from "openid-client";
++
++/**
++ * Keeps the Google ID token in the session fresh.
++ *
++ * The session stores the Google ID token, and both this API (`authenticated`)
++ * and the device firmware (`authenticateSession` in jetkvm/kvm cloud.go)
++ * reject it once its `exp` has passed. Google issues ID tokens for one hour,
++ * so without a refresh every user was signed out, and could no longer open a
++ * KVM session, an hour after login.
++ *
++ * At sign-in we now ask Google for a refresh token (`access_type=offline`),
++ * keep it in the session cookie encrypted with a key derived from
++ * COOKIE_SECRET (cookie-session only signs, it does not encrypt), and swap in a
++ * new ID token shortly before the current one expires.
++ */
++
++/** Refresh when the ID token has less than this left. */
++export const REFRESH_MARGIN_MS = 5 * 60 * 1000;
++
++/** Stop refreshing this long after sign-in, forcing a fresh Google login. */
++export const SESSION_ABSOLUTE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
++
++type Session = {
++  id_token?: string | null;
++  refresh_token_sealed?: string | null;
++  authenticatedAt?: number | null;
++} & Record<string, unknown>;
++
++const ALGORITHM = "aes-256-gcm";
++
++function encryptionKey(): Buffer {
++  const secret = process.env.COOKIE_SECRET;
++  if (!secret) throw new Error("COOKIE_SECRET is not set");
++  return createHash("sha256").update(`jetkvm-cloud/refresh-token:${secret}`).digest();
++}
++
++/** Encrypts a refresh token for storage in the session cookie. */
++export function sealRefreshToken(refreshToken: string): string {
++  const iv = randomBytes(12);
++  const cipher = createCipheriv(ALGORITHM, encryptionKey(), iv);
++  const ciphertext = Buffer.concat([cipher.update(refreshToken, "utf8"), cipher.final()]);
++  return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString("base64url");
++}
++
++/** Decrypts a sealed refresh token; null if it is malformed or was sealed with another key. */
++export function openRefreshToken(sealed: string): string | null {
++  try {
++    const raw = Buffer.from(sealed, "base64url");
++    if (raw.length < 12 + 16 + 1) return null;
++    const decipher = createDecipheriv(ALGORITHM, encryptionKey(), raw.subarray(0, 12));
++    decipher.setAuthTag(raw.subarray(12, 28));
++    return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
++  } catch {
++    return null;
++  }
++}
++
++let clientPromise: Promise<BaseClient> | null = null;
++
++function googleClient(): Promise<BaseClient> {
++  clientPromise ??= Issuer.discover("https://accounts.google.com")
++    .then(
++      issuer =>
++        new issuer.Client({
++          client_id: process.env.GOOGLE_CLIENT_ID!,
++          client_secret: process.env.GOOGLE_CLIENT_SECRET,
++          response_types: ["code"],
++        }),
++    )
++    .catch(error => {
++      clientPromise = null; // retry discovery next time
++      throw error;
++    });
++  return clientPromise;
++}
++
++type Refresher = (refreshToken: string) => Promise<Pick<TokenSet, "id_token" | "refresh_token">>;
++
++let refresher: Refresher = async refreshToken => (await googleClient()).refresh(refreshToken);
++
++/** Test hook: replaces the call to Google's token endpoint. */
++export function setRefresher(fn: Refresher | null) {
++  refresher = fn ?? (async refreshToken => (await googleClient()).refresh(refreshToken));
++}
++
++// Parallel requests from one browser share a single refresh.
++const inFlight = new Map<string, ReturnType<Refresher>>();
++
++function needsRefresh(idToken: string, now: number): boolean {
++  try {
++    const { exp } = jose.decodeJwt(idToken);
++    return typeof exp !== "number" || exp * 1000 - now < REFRESH_MARGIN_MS;
++  } catch {
++    return false; // not a JWT; leave it for `authenticated` to reject
++  }
++}
++
++/**
++ * Replaces `session.id_token` with a fresh one when it is about to expire.
++ * Mutates the session object only; returns true when it did.
++ * Never throws: on failure the old token stays and normal auth decides.
++ */
++export async function ensureFreshIdToken(session: Session | null | undefined): Promise<boolean> {
++  const idToken = session?.id_token;
++  const sealed = session?.refresh_token_sealed;
++  if (!session || typeof idToken !== "string" || typeof sealed !== "string") return false;
++
++  const now = Date.now();
++  if (!needsRefresh(idToken, now)) return false;
++
++  const authenticatedAt = session.authenticatedAt;
++  if (typeof authenticatedAt === "number" && now - authenticatedAt > SESSION_ABSOLUTE_MAX_AGE_MS) {
++    return false;
++  }
++
++  const refreshToken = openRefreshToken(sealed);
++  if (!refreshToken) return false;
++
++  try {
++    let pending = inFlight.get(sealed);
++    if (!pending) {
++      pending = refresher(refreshToken).finally(() => inFlight.delete(sealed));
++      inFlight.set(sealed, pending);
++    }
++    const tokenSet = await pending;
++    if (!tokenSet.id_token) {
++      console.warn("[auth] Token refresh returned no ID token");
++      return false;
++    }
++
++    const previousSub = jose.decodeJwt(idToken).sub;
++    if (jose.decodeJwt(tokenSet.id_token).sub !== previousSub) {
++      console.warn("[auth] Token refresh returned a different subject; ignoring it");
++      return false;
++    }
++
++    session.id_token = tokenSet.id_token;
++    if (tokenSet.refresh_token && tokenSet.refresh_token !== refreshToken) {
++      session.refresh_token_sealed = sealRefreshToken(tokenSet.refresh_token);
++    }
++    return true;
++  } catch (error) {
++    console.warn("[auth] Token refresh failed:", (error as Error)?.message ?? error);
++    return false;
++  }
++}
++
++/** Express middleware: refresh the session's ID token before route handlers read it. */
++export const refreshSessionToken = async (req: Request, _res: Response, next: NextFunction) => {
++  await ensureFreshIdToken(req.session as Session | null | undefined);
++  next();
++};
+diff --git a/src/webrtc-signaling.ts b/src/webrtc-signaling.ts
+index 49ef4d2..af75048 100644
+--- a/src/webrtc-signaling.ts
++++ b/src/webrtc-signaling.ts
+@@ -1,6 +1,6 @@
+ // src/webrtc.ts
+ 
+-import { MessageEvent, WebSocket, WebSocketServer } from "ws";
++import { MessageEvent, RawData, WebSocket, WebSocketServer } from "ws";
+ import * as jose from "jose";
+ import { prisma } from "./db";
+ import { IncomingMessage } from "http";
+@@ -9,6 +9,7 @@ import { Device } from "@prisma/client";
+ import { Server, ServerResponse } from "node:http";
+ import { cookieSessionMiddleware } from ".";
+ import { effectiveSku, normalizeSku } from "./skus";
++import { ensureFreshIdToken } from "./token-refresh";
+ 
+ export interface DeviceConnection {
+   ws: WebSocket;
+@@ -230,7 +231,7 @@ async function handleClientSocketRequest(
+     cookieSessionMiddleware(req as any, {} as any, async () => {
+       try {
+         // Authenticate client and get device ID
+-        const { deviceId, token } = await authenticateClientRequest(req as any);
++        const { deviceId } = await authenticateClientRequest(req as any);
+         if (!deviceId) {
+           return socket.destroy();
+         }
+@@ -244,7 +245,7 @@ async function handleClientSocketRequest(
+ 
+         // Complete the WebSocket upgrade
+         wssClient.handleUpgrade(req, socket, head, ws => {
+-          setupClientWebSocket(ws, deviceId, token);
++          setupClientWebSocket(ws, deviceId, (req as any).session);
+         });
+       } catch (error) {
+         console.error("Error in client WebSocket setup:", error);
+@@ -260,6 +261,8 @@ async function handleClientSocketRequest(
+ // Authenticate the client connection
+ async function authenticateClientRequest(req: Request & { session: any }) {
+   const session = req.session;
++  // No response to carry a new cookie here; the refreshed token is used in memory.
++  await ensureFreshIdToken(session);
+   const token = session?.id_token;
+ 
+   if (!token) {
+@@ -288,7 +291,7 @@ async function authenticateClientRequest(req: Request & { session: any }) {
+       return { deviceId: null };
+     }
+ 
+-    return { deviceId, token };
++    return { deviceId };
+   } catch (error) {
+     console.error("[Client] Authentication error:", error);
+     return { deviceId: null };
+@@ -296,7 +299,7 @@ async function authenticateClientRequest(req: Request & { session: any }) {
+ }
+ 
+ // Setup the client WebSocket after authentication
+-function setupClientWebSocket(clientWs: WebSocket, deviceId: string, token: string) {
++function setupClientWebSocket(clientWs: WebSocket, deviceId: string, session: any) {
+   console.log(`[Client] New connection for device ${deviceId}`);
+ 
+   // Get device WebSocket
+@@ -329,15 +332,24 @@ function setupClientWebSocket(clientWs: WebSocket, deviceId: string, token: stri
+   );
+ 
+   // Handle message forwarding from client to device
++  // Messages are forwarded in order through this chain: an offer may wait for
++  // an ID token refresh, and the ICE candidates behind it must not overtake it.
++  let forwardChain: Promise<void> = Promise.resolve();
++
+   clientWs.on("message", data => {
+     // Handle ping/pong
+     if (data.toString() === "ping") return clientWs.send("pong");
++    forwardChain = forwardChain.then(() => forwardClientMessage(data));
++  });
+ 
++  const forwardClientMessage = async (data: RawData) => {
+     try {
+       const msg = JSON.parse(data.toString());
+ 
+       switch (msg.type) {
+         case "offer":
++          // The device verifies this token's expiry, so renew it on long-lived sockets.
++          await ensureFreshIdToken(session);
+           console.log(`[Client] Sending offer to device ${deviceId}`);
+           deviceWs.send(
+             JSON.stringify({
+@@ -346,7 +358,7 @@ function setupClientWebSocket(clientWs: WebSocket, deviceId: string, token: stri
+                 sd: msg.data.sd,
+                 ip,
+                 iceServers,
+-                OidcGoogle: token,
++                OidcGoogle: session?.id_token,
+               },
+             }),
+           );
+@@ -365,7 +377,7 @@ function setupClientWebSocket(clientWs: WebSocket, deviceId: string, token: stri
+     } catch (error) {
+       console.error(`[Client] Error processing message for ${deviceId}:`, error);
+     }
+-  });
++  };
+ 
+   // Handle message forwarding from device to client
+   const deviceMessageHandler = (event: MessageEvent) => {
+diff --git a/test/token-refresh.test.ts b/test/token-refresh.test.ts
+new file mode 100644
+index 0000000..9d92478
+--- /dev/null
++++ b/test/token-refresh.test.ts
+@@ -0,0 +1,136 @@
++import * as jose from "jose";
++import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
++
++import {
++  ensureFreshIdToken,
++  openRefreshToken,
++  REFRESH_MARGIN_MS,
++  SESSION_ABSOLUTE_MAX_AGE_MS,
++  sealRefreshToken,
++  setRefresher,
++} from "../src/token-refresh";
++
++const secret = new TextEncoder().encode("test-signing-key-test-signing-key");
++
++async function idToken(expiresInMs: number, sub = "google-sub-1") {
++  const now = Date.now();
++  return new jose.SignJWT({ email: "user@example.com" })
++    .setProtectedHeader({ alg: "HS256" })
++    .setSubject(sub)
++    .setIssuedAt(Math.floor(now / 1000))
++    .setExpirationTime(Math.floor((now + expiresInMs) / 1000))
++    .sign(secret);
++}
++
++beforeAll(() => {
++  process.env.COOKIE_SECRET = "cookie-secret-for-tests";
++});
++
++afterEach(() => setRefresher(null));
++
++describe("sealRefreshToken / openRefreshToken", () => {
++  it("round-trips and does not leak the token", () => {
++    const sealed = sealRefreshToken("1//refresh-token");
++    expect(sealed).not.toContain("refresh-token");
++    expect(openRefreshToken(sealed)).toBe("1//refresh-token");
++  });
++
++  it("rejects tampered or foreign values", () => {
++    const sealed = sealRefreshToken("1//refresh-token");
++    const tampered = sealed.slice(0, -2) + (sealed.endsWith("A") ? "BB" : "AA");
++    expect(openRefreshToken(tampered)).toBeNull();
++    expect(openRefreshToken("not-sealed")).toBeNull();
++
++    process.env.COOKIE_SECRET = "another-secret";
++    expect(openRefreshToken(sealed)).toBeNull();
++    process.env.COOKIE_SECRET = "cookie-secret-for-tests";
++  });
++});
++
++describe("ensureFreshIdToken", () => {
++  it("leaves a token with plenty of time left alone", async () => {
++    const refresher = vi.fn();
++    setRefresher(refresher);
++    const session = { id_token: await idToken(30 * 60 * 1000), refresh_token_sealed: sealRefreshToken("rt") };
++
++    expect(await ensureFreshIdToken(session)).toBe(false);
++    expect(refresher).not.toHaveBeenCalled();
++  });
++
++  it("replaces an expired token using the stored refresh token", async () => {
++    const fresh = await idToken(60 * 60 * 1000);
++    const refresher = vi.fn().mockResolvedValue({ id_token: fresh });
++    setRefresher(refresher);
++    const session = {
++      id_token: await idToken(-10 * 60 * 1000),
++      refresh_token_sealed: sealRefreshToken("rt-1"),
++      authenticatedAt: Date.now() - 2 * 60 * 60 * 1000,
++    };
++
++    expect(await ensureFreshIdToken(session)).toBe(true);
++    expect(refresher).toHaveBeenCalledWith("rt-1");
++    expect(session.id_token).toBe(fresh);
++  });
++
++  it("refreshes inside the margin and stores a rotated refresh token", async () => {
++    setRefresher(async () => ({ id_token: await idToken(60 * 60 * 1000), refresh_token: "rt-2" }));
++    const session = {
++      id_token: await idToken(REFRESH_MARGIN_MS - 60 * 1000),
++      refresh_token_sealed: sealRefreshToken("rt-1"),
++    };
++
++    expect(await ensureFreshIdToken(session)).toBe(true);
++    expect(openRefreshToken(session.refresh_token_sealed)).toBe("rt-2");
++  });
++
++  it("shares one refresh between parallel requests", async () => {
++    const refresher = vi.fn(async () => ({ id_token: await idToken(60 * 60 * 1000) }));
++    setRefresher(refresher);
++    const expired = await idToken(-1000);
++    const sealed = sealRefreshToken("rt");
++    const a = { id_token: expired, refresh_token_sealed: sealed };
++    const b = { id_token: expired, refresh_token_sealed: sealed };
++
++    await Promise.all([ensureFreshIdToken(a), ensureFreshIdToken(b)]);
++    expect(refresher).toHaveBeenCalledTimes(1);
++    expect(a.id_token).toBe(b.id_token);
++  });
++
++  it("does nothing without a refresh token (sessions from before this change)", async () => {
++    const session = { id_token: await idToken(-1000) };
++    expect(await ensureFreshIdToken(session)).toBe(false);
++  });
++
++  it("stops refreshing after the absolute session lifetime", async () => {
++    const refresher = vi.fn();
++    setRefresher(refresher);
++    const session = {
++      id_token: await idToken(-1000),
++      refresh_token_sealed: sealRefreshToken("rt"),
++      authenticatedAt: Date.now() - SESSION_ABSOLUTE_MAX_AGE_MS - 1000,
++    };
++
++    expect(await ensureFreshIdToken(session)).toBe(false);
++    expect(refresher).not.toHaveBeenCalled();
++  });
++
++  it("keeps the old token when Google refuses the refresh", async () => {
++    setRefresher(async () => {
++      throw new Error("invalid_grant");
++    });
++    const expired = await idToken(-1000);
++    const session = { id_token: expired, refresh_token_sealed: sealRefreshToken("rt") };
++
++    expect(await ensureFreshIdToken(session)).toBe(false);
++    expect(session.id_token).toBe(expired);
++  });
++
++  it("ignores a refreshed token for another subject", async () => {
++    setRefresher(async () => ({ id_token: await idToken(60 * 60 * 1000, "someone-else") }));
++    const expired = await idToken(-1000);
++    const session = { id_token: expired, refresh_token_sealed: sealRefreshToken("rt") };
++
++    expect(await ensureFreshIdToken(session)).toBe(false);
++    expect(session.id_token).toBe(expired);
++  });
++});
+-- 
+2.43.0
+

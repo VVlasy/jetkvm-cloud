@@ -8,7 +8,7 @@ api:
   name: cloud-api
   image:
     repository: ghcr.io/vvlasy/jetkvm-cloud-api
-    tag: d08418e
+    tag: a96f7d4-p6b6c3a4
   # The existing Secret `cloud-api` already holds every env var (secrets and config).
   # Keys below in `config` override the same keys in that Secret, because the ConfigMap
   # is loaded after it.
@@ -46,7 +46,7 @@ ui:
   name: cloud-ui
   image:
     repository: ghcr.io/vvlasy/jetkvm-cloud-ui
-    tag: "0.5.9"
+    tag: "0.5.10"
   ingress:
     enabled: true
     className: traefik

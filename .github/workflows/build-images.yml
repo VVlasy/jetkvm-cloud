@@ -44,7 +44,13 @@ jobs:
             ref=$(sed -nE 's/^ARG CLOUD_API_REF=(.+)$/\1/p' build/cloud-api/Dockerfile)
           fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "short=${ref:0:7}" >> "$GITHUB_OUTPUT"
+          short="${ref:0:7}"
+          # Patched builds get a suffix from the patch contents, so the tag never
+          # names an image that differs from plain upstream at that commit.
+          if ls build/cloud-api/patches/*.patch >/dev/null 2>&1; then
+            short="${short}-p$(cat build/cloud-api/patches/*.patch | sha256sum | cut -c1-7)"
+          fi
+          echo "short=$short" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: build/cloud-api

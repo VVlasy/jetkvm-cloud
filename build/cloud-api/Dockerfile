@@ -11,11 +11,14 @@
 #
 # Migrations are NOT run here; the chart runs `npx prisma migrate deploy` in an
 # init container from this same image.
+#
+# Local patches in patches/*.patch are applied on top of the upstream source, in
+# name order, with `git apply`. A patch that no longer applies fails the build.
 
 ARG NODE_VERSION=22.23.4
 ARG CLOUD_API_REPO=https://github.com/jetkvm/cloud-api.git
-# Full commit SHA (40 chars), tag, or branch. Default: main @ 2026-10-21 (Node 22.23.4 security bump).
-ARG CLOUD_API_REF=d08418e650b6a03c17dbdc90bbd7cde2b105c7f2
+# Full commit SHA (40 chars), tag, or branch. Default: main @ 2026-11-06 (#95, Device.id primary key).
+ARG CLOUD_API_REF=a96f7d4706e75d557f7c5b383caa722e69ac77bb
 
 # ---------------------------------------------------------------- source
 FROM node:${NODE_VERSION}-bookworm-slim AS src
@@ -26,11 +29,13 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 # `git fetch <ref>` accepts full SHAs, tags and branches; `clone --branch` does not take SHAs.
+COPY patches /patches
 RUN git init -q \
   && git remote add origin "${CLOUD_API_REPO}" \
   && git fetch -q --depth 1 origin "${CLOUD_API_REF}" \
   && git checkout -q FETCH_HEAD \
   && git rev-parse HEAD > /src/.git-sha \
+  && for p in /patches/*.patch; do [ -e "$p" ] || continue; echo "applying $p"; git apply "$p"; done \
   && rm -rf /src/.git
 
 # ---------------------------------------------------------------- app
